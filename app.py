@@ -45,7 +45,7 @@ __all__ = [
 
 
 def main() -> None:
-    st.set_page_config(page_title="X3P Automated Marketing Team", layout="wide")
+    st.set_page_config(page_title="CMO", layout="wide")
     render_minimal_customer_ui()
 
 

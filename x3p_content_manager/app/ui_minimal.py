@@ -252,7 +252,7 @@ def render_minimal_customer_ui() -> None:
     st.markdown(
         """
         <div class="mini-hero">
-          <h1>X3P Automated Marketing Team</h1>
+          <h1>CMO</h1>
           <p>Create one complete marketing package with built-in quality checks and export-ready files.</p>
           <div class="mini-steps"><span>Draft</span><span>Check</span><span>Adapt</span><span>Export</span></div>
         </div>
@@ -510,7 +510,7 @@ def render_minimal_customer_ui() -> None:
                         mime=mime,
                         key=f"mini_download_{idx}_{os.path.basename(fp)}",
                     )
-            st.caption("Files are saved under /Users/aminkarimidehnashi/AI_Agents/src/outputs and /Users/aminkarimidehnashi/AI_Agents/src/runs.")
+            st.caption("Files are saved under `outputs/` and `runs/` in the current project.")
 
         with qa_tab:
             qa_inputs = st.session_state.get("last_inputs", default_inputs())

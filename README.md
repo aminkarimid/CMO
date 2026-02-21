@@ -1,4 +1,4 @@
-# X3P Minimal v2
+# CMO
 
 Focused automated marketing app for X3P:
 - Blog generation
