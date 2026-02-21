@@ -1,0 +1,5 @@
+streamlit
+crewai[tools]
+pyyaml
+requests
+pytest

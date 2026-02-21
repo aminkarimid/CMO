@@ -1,0 +1,177 @@
+strategy_outline_task:
+  description: |
+    Use the project brief and brand guidelines if provided in inputs.
+    Brief: {brief}
+    Brand guide: {brand_guide}
+    Topic: {topic}
+    Audience: {audience}
+    Tone: {tone}
+    Produce a concise narrative-first outline for a blog post about X3P and good jobs.
+
+    Respond with Markdown only. No code fences. No Thought/Action logs.
+
+    Required headings (exactly):
+    ## Working title
+    ## Opening vignette
+    ## Section 1 — Opportunity Gap
+    ## Section 2 — X3P in Action
+    ## Section 3 — Proof & Momentum
+    ## How it works
+    ## CTA
+
+    Rules:
+    - Do not invent statistics, partner names, dates, or policy claims.
+    - If evidence is uncertain, state "Evidence pending verification".
+    - Keep the outline concise and ready for drafting.
+  expected_output: >
+    A markdown strategy outline with all required headings.
+  agent: strategist
+
+writing_task:
+  description: |
+    Write a narrative-first blog draft using this context:
+    Brief: {brief}
+    Brand guide: {brand_guide}
+    Topic: {topic}
+    Audience: {audience}
+    Tone: {tone}
+    Key facts: {key_facts}
+    Preferred title (optional): {preferred_title}
+    Angle (optional): {angle_choice}
+
+    Output Markdown with this exact structure:
+    1) YAML front matter
+    ---
+    title: "..."
+    description: "..."
+    slug: ...
+    date: {current_year}-09-20
+    author: "X3P Team"
+    tags:
+      - ...
+      - ...
+      - ...
+    ---
+
+    2) Narrative body with exact headings:
+    ### Opportunity Gap
+    ### How X3P Builds Good Jobs
+    ### Outcomes & Partnerships
+
+    3) CTA paragraph containing both:
+    - Visit x3p.ai
+    - partnerships@x3p.ai
+
+    4) Final section:
+    ## Sources
+    - Source Name — [Title](URL)
+
+    Rules:
+    - No fabricated sources, stats, dates, or institutions.
+    - If a numeric claim cannot be verified, avoid the number.
+    - Keep prose paragraph-driven (not list-heavy).
+  expected_output: >
+    A complete blog markdown draft with required headings and sources.
+  agent: content_writer
+
+editing_task:
+  description: |
+    Edit the blog for publication quality and strict format compliance.
+    Brief: {brief}
+    Brand guide: {brand_guide}
+    Draft to edit: {blog_post}
+    Fact-check findings (if available): {factcheck_report}
+    Brand report (if available): {brand_report}
+
+    Keep and repair the required structure if needed:
+    - YAML front matter
+    - ### Opportunity Gap
+    - ### How X3P Builds Good Jobs
+    - ### Outcomes & Partnerships
+    - CTA containing Visit x3p.ai and partnerships@x3p.ai
+    - ## Sources
+
+    Output only final markdown. No reviewer notes.
+  expected_output: >
+    A clean publication-ready blog markdown document.
+  agent: editor
+
+social_media_task:
+  description: |
+    Create platform-ready social copy from X3P narrative context.
+    Brief: {brief}
+    Brand guide: {brand_guide}
+    Topic: {topic}
+    Audience: {audience}
+    Tone: {tone}
+    Key facts: {key_facts}
+    Blog context: {blog_post}
+    Fact-check findings: {factcheck_report}
+    Brand report: {brand_report}
+
+    Output only markdown with these exact section headings:
+    ## LinkedIn post 1
+    ## LinkedIn post 2
+    ## Facebook post 1
+    ## Facebook post 2
+    ## Instagram caption 1
+    ## Instagram caption 2
+
+    Each section must include:
+    - A strong hook
+    - 1–2 proof sentences (only verified claims)
+    - A CTA ending with "Visit x3p.ai"
+    - A hashtags line: "Hashtags: ..."
+
+    Instagram captions must include:
+    - "Suggested visual: ..."
+
+    Rules:
+    - No fabricated metrics or dates.
+    - No tool traces or debugging text.
+  expected_output: >
+    A markdown package containing LinkedIn, Facebook, and Instagram copy.
+  agent: social_media_manager
+
+fact_check_task:
+  description: |
+    Fact-check blog and social outputs with high source discipline.
+    Trusted domains: {trusted_domains}
+    Blog draft: {blog_post}
+    Social draft: {social_outputs}
+
+    Output must start with a one-line JSON header (no code fence):
+    {"severity":"NONE|MINOR|MAJOR|CRITICAL","issues":N,"summary":"..."}
+
+    Then include a markdown table with columns:
+    - Claim
+    - Status (Verified | Weak | Unsupported)
+    - Action (Keep | Soften | Remove)
+    - Evidence URL
+
+    Rules:
+    - Unsupported claim => mark Unsupported and recommend Soften/Remove.
+    - Avoid filler text; keep concrete and actionable.
+  expected_output: >
+    A severity-tagged fact-check report in markdown.
+  agent: fact_checker
+
+brandcheck_task:
+  description: |
+    Review outputs for brand alignment and risky tone.
+    Brief: {brief}
+    Brand guide: {brand_guide}
+    Blog draft: {blog_post}
+    Social draft: {social_outputs}
+
+    Output must start with a one-line JSON header (no code fence):
+    {"severity":"NONE|MINOR|MAJOR|CRITICAL","issues":N,"summary":"..."}
+
+    Then provide concise markdown findings with concrete fixes.
+
+    Rules:
+    - Flag overclaims, off-brand framing, and certainty language without support.
+    - Keep findings practical and publish-oriented.
+  expected_output: >
+    A brand review report in markdown with severity header.
+  agent: brand_guardian

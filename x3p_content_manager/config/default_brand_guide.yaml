@@ -1,0 +1,30 @@
+voice:
+  - Empathetic & supportive — always acknowledge the human side of care.
+  - Professional & trustworthy — clear, compliant, and respectful.
+  - Empowering & inclusive — highlight immigrant and hidden labor as a source of strength.
+  - Solution-oriented — position X3P as a reliable, AI-powered fix to a systemic problem.
+  - Community-building — emphasize partnerships, families, and collective benefits.
+tone:
+  - Warm & caring for families and caregivers: approachable, reassuring, clear.
+  - Credible & data-driven for partners, investors, policymakers: confident, fact-based, concise.
+  - Optimistic & mission-driven for public storytelling: focus on creating good jobs, better lives, stronger communities.
+banned_words:
+  - cheap labor
+  - low-quality
+  - unskilled
+  - guaranteed results
+  - perfect care
+  - instant fix
+  - maid
+  - servant
+  - helper
+  - crisis
+  - synergy
+  - paradigm shift
+  - disruptive
+  # Avoid legacy geo/weather references unless explicitly in brief
+  - Miami
+  - Miami-Dade
+  - South Florida
+  - hurricane
+  - hurricane season

@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# macOS / editor
+.DS_Store
+
+# Virtual environment
+.venv/
+
+# Runtime artifacts
+runs/
+outputs/
+
+# Local DB / logs
+data/*.db
+streamlit.log
+.Rhistory
+
+# Keep empty runtime dirs when needed
+!runs/.gitkeep
+!outputs/.gitkeep
+!data/.gitkeep
