@@ -140,11 +140,9 @@ def lint_configs() -> int:
 
     tool_names = {
         "tavily_tool",
-        "semantic_scholar_tool",
-        "pubmed_tool",
         "social_trends_tool",
-        "world_bank_tool",
-        "oecd_tool",
+        "trend_verifier_tool",
+        "x3p_site_snapshot_tool",
         "brand_retriever_tool",
     }
 

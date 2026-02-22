@@ -12,18 +12,14 @@ from x3p_content_manager import tools
 
 
 def _configure_crewai_storage() -> None:
-    """Force CrewAI SQLite storage into a writable local folder.
-
-    In restricted/sandboxed environments CrewAI's default appdirs path
-    (~/Library/Application Support/...) can be read-only.
-    """
+    """Force CrewAI SQLite storage into a writable local folder."""
     try:
         storage_dir = Path.cwd() / "runs" / "crewai_storage"
         storage_dir.mkdir(parents=True, exist_ok=True)
         local_path = str(storage_dir)
 
-        import crewai.utilities.paths as _paths
         import crewai.memory.storage.kickoff_task_outputs_storage as _kickoff_store
+        import crewai.utilities.paths as _paths
 
         def _local_db_storage_path() -> str:
             return local_path
@@ -31,7 +27,6 @@ def _configure_crewai_storage() -> None:
         _paths.db_storage_path = _local_db_storage_path  # type: ignore[assignment]
         _kickoff_store.db_storage_path = _local_db_storage_path  # type: ignore[attr-defined]
     except Exception:
-        # Non-fatal: if patching fails, CrewAI will use its defaults.
         pass
 
 
@@ -40,7 +35,7 @@ _configure_crewai_storage()
 
 @CrewBase
 class X3PCareContentCrew:
-    """Focused X3P crew for blog + social + QA pipelines."""
+    """Focused X3P crew for blog + social + QA + intelligence pipelines."""
 
     agents: List[BaseAgent]
     tasks: List[Task]
@@ -49,9 +44,10 @@ class X3PCareContentCrew:
         configured = str(configured_llm or "").strip()
         backend = str(os.getenv("X3P_ACTIVE_BACKEND", "")).strip().lower()
         if backend == "openai":
-            return str(os.getenv("X3P_OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+            model = str(os.getenv("X3P_OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+            return model if model.startswith("openai/") else f"openai/{model}"
         if backend == "ollama":
-            model = str(os.getenv("X3P_OLLAMA_MODEL", "ollama/llama3.1:8b")).strip() or "ollama/llama3.1:8b"
+            model = str(os.getenv("X3P_OLLAMA_MODEL", "llama3.1:8b")).strip() or "llama3.1:8b"
             return model if model.startswith("ollama/") else f"ollama/{model}"
         return configured
 
@@ -87,36 +83,50 @@ class X3PCareContentCrew:
     def brand_guardian(self) -> Agent:
         return Agent(config=self._agent_config("brand_guardian"), verbose=True)
 
+    @agent
+    def brand_intel_analyst(self) -> Agent:
+        return Agent(config=self._agent_config("brand_intel_analyst"), verbose=True)
+
+    @agent
+    def trend_intel_analyst(self) -> Agent:
+        return Agent(config=self._agent_config("trend_intel_analyst"), verbose=True)
+
     # Tool bindings used by agents.yaml
     @tool
     def tavily_tool(self):
         return tools.tavily_tool
 
     @tool
-    def semantic_scholar_tool(self):
-        return tools.semantic_scholar_tool
-
-    @tool
-    def pubmed_tool(self):
-        return tools.pubmed_tool
-
-    @tool
     def social_trends_tool(self):
         return tools.social_trends_tool
 
     @tool
-    def world_bank_tool(self):
-        return tools.world_bank_tool
+    def trend_verifier_tool(self):
+        return tools.trend_verifier_tool
 
     @tool
-    def oecd_tool(self):
-        return tools.oecd_tool
+    def x3p_site_snapshot_tool(self):
+        return tools.x3p_site_snapshot_tool
 
     @tool
     def brand_retriever_tool(self):
         return tools.brand_retriever_tool
 
     # Tasks
+    @task
+    def brand_intel_refresh_task(self) -> Task:
+        return Task(
+            config=self.tasks_config["brand_intel_refresh_task"],
+            output_file="outputs/brand/x3p_brand_snapshot_brief.json",
+        )
+
+    @task
+    def trend_brief_task(self) -> Task:
+        return Task(
+            config=self.tasks_config["trend_brief_task"],
+            output_file="outputs/social/x3p_trend_brief.json",
+        )
+
     @task
     def strategy_outline_task(self) -> Task:
         return Task(
@@ -160,6 +170,26 @@ class X3PCareContentCrew:
         )
 
     # Crews
+    @crew
+    def brand_intel_crew(self) -> Crew:
+        return Crew(
+            agents=[self.brand_intel_analyst()],
+            tasks=[self.brand_intel_refresh_task()],
+            process=Process.sequential,
+            memory=False,
+            verbose=True,
+        )
+
+    @crew
+    def trend_intel_crew(self) -> Crew:
+        return Crew(
+            agents=[self.trend_intel_analyst()],
+            tasks=[self.trend_brief_task()],
+            process=Process.sequential,
+            memory=False,
+            verbose=True,
+        )
+
     @crew
     def blog_crew(self) -> Crew:
         return Crew(
@@ -214,19 +244,23 @@ class X3PCareContentCrew:
     def full_crew(self) -> Crew:
         return Crew(
             agents=[
+                self.brand_intel_analyst(),
                 self.strategist(),
                 self.content_writer(),
                 self.editor(),
                 self.fact_checker(),
                 self.brand_guardian(),
+                self.trend_intel_analyst(),
                 self.social_media_manager(),
             ],
             tasks=[
+                self.brand_intel_refresh_task(),
                 self.strategy_outline_task(),
                 self.writing_task(),
                 self.editing_task(),
                 self.fact_check_task(),
                 self.brandcheck_task(),
+                self.trend_brief_task(),
                 self.social_media_task(),
             ],
             process=Process.sequential,

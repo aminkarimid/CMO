@@ -11,6 +11,7 @@ class LiveProgress:
     FRIENDLY = {
         "Blog": "Draft blog",
         "Blog (Re-Edit)": "Refine blog",
+        "Trend Intel": "Analyze verified trends",
         "Social": "Adapt social posts",
         "Fact-check": "Verify claims",
         "Brand Check": "Check brand fit",
@@ -39,10 +40,11 @@ class LiveProgress:
 
     def _render(self) -> None:
         icons = {"running": "⏳", "done": "✅", "failed": "❌"}
+        status_label = {"running": "Running", "done": "Success", "failed": "Failed"}
         lines = ["#### Progress"]
         for row in self._rows:
             label = self.FRIENDLY.get(row["label"], row["label"])
-            text = f"{icons.get(row['status'], '•')} **{label}**"
+            text = f"{icons.get(row['status'], '•')} **{label}** ({status_label.get(row['status'], 'Unknown')})"
             if row.get("note"):
                 text += f" · {row['note']}"
             lines.append(f"- {text}")

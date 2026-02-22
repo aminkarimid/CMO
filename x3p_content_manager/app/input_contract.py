@@ -13,8 +13,8 @@ SHARED_CONTEXT_KEYS = [
     "social_outputs",
     "factcheck_report",
     "brand_report",
-    "research_summary",
-    "scholar_summary",
+    "brand_snapshot",
+    "trend_brief",
 ]
 
 DEFAULT_KEY_FACTS_TEXT = (
@@ -65,6 +65,9 @@ def default_inputs() -> dict[str, Any]:
             "un.org",
         ],
         "brand_guide": load_default_brand_guide(),
+        "brand_snapshot": "",
+        "trend_brief": "",
+        "trend_window_days": 7,
         # Optional fields referenced by templates; always present to avoid crashes.
         "preferred_title": "",
         "angle_choice": "",

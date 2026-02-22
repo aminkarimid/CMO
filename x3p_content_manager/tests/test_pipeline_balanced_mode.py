@@ -75,6 +75,17 @@ def test_social_pipeline_keeps_initial_output_if_rerun_empty(monkeypatch):
         raise AssertionError(f"Unexpected builder: {builder_name}")
 
     monkeypatch.setattr(pipeline_mod, "run_builder_instance", _stub_run_builder_instance)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "_run_trend_intel_stage",
+        lambda inputs: {
+            "label": "Trend Intel",
+            "text": '{"ok": true}',
+            "payload": {"kept_claims": [{"claim": "x"}], "dropped_claims": []},
+            "usage": {"duration_ms": 1},
+            "warning": None,
+        },
+    )
     inputs = app.build_template_safe_inputs({"topic": "x3p", "audience": "users", "tone": "clear", "key_facts": []})
     text, payload, usage, warnings = pipeline_mod.run_pipeline_with_quality_gate(
         crew=object(),
@@ -88,12 +99,31 @@ def test_social_pipeline_keeps_initial_output_if_rerun_empty(monkeypatch):
     assert counts["social"] == 2
     assert counts["fact"] == 1
     assert counts["brand"] == 1
+    assert "Trend Intel" in payload
     assert any("kept initial social draft" in w for w in warnings)
     assert "Social" in payload
     assert "Social" in usage
 
 
-def test_social_fallback_contains_required_section_headings(monkeypatch):
+def test_social_pipeline_fails_when_trend_intel_has_no_verified_claims(monkeypatch):
+    app = _load_app_module()
+    monkeypatch.setattr(
+        pipeline_mod,
+        "_run_trend_intel_stage",
+        lambda inputs: (_ for _ in ()).throw(pipeline_mod.StageDependencyError("No trend claims passed strict verification")),
+    )
+
+    with pytest.raises(pipeline_mod.StageDependencyError):
+        pipeline_mod.run_pipeline_with_quality_gate(
+            crew=object(),
+            pipeline="Social",
+            inputs=app.build_template_safe_inputs({"topic": "x3p", "audience": "users", "tone": "clear"}),
+            variants=1,
+            progress=None,
+        )
+
+
+def test_run_builder_instance_timeout_raises_stage_timeout(monkeypatch):
     app = _load_app_module()
 
     class _FailingCrew:
@@ -104,18 +134,14 @@ def test_social_fallback_contains_required_section_headings(monkeypatch):
         def social_crew(self):
             return _FailingCrew()
 
-    result = app.run_builder_instance(
-        crew=_Factory(),
-        builder_name="social_crew",
-        label="Social",
-        base_inputs={"topic": "x3p", "audience": "users"},
-        variant_count=1,
-    )
-
-    text = result["text"]
-    assert "## LinkedIn post 1" in text
-    assert "## Facebook post 1" in text
-    assert "## Instagram caption 1" in text
+    with pytest.raises(pipeline_mod.StageTimeoutError):
+        app.run_builder_instance(
+            crew=_Factory(),
+            builder_name="social_crew",
+            label="Social",
+            base_inputs={"topic": "x3p", "audience": "users"},
+            variant_count=1,
+        )
 
 
 def test_build_template_safe_inputs_handles_missing_optional_keys():
@@ -123,6 +149,8 @@ def test_build_template_safe_inputs_handles_missing_optional_keys():
     safe = app.build_template_safe_inputs({"topic": "x3p"})
     assert safe["preferred_title"] == ""
     assert safe["angle_choice"] == ""
+    assert safe["trend_brief"] == ""
+    assert safe["brand_snapshot"] == ""
 
 
 def test_run_builder_instance_fails_fast_on_backend_error():
@@ -183,15 +211,14 @@ def test_run_builder_instance_timeout_does_not_block_until_worker_finishes(monke
 
     monkeypatch.setattr(pipeline_mod, "_step_timeout_seconds", lambda: 1)
     start = time.perf_counter()
-    result = app.run_builder_instance(
-        crew=_Factory(),
-        builder_name="social_crew",
-        label="Social",
-        base_inputs={"topic": "x3p", "audience": "users"},
-        variant_count=1,
-    )
+    with pytest.raises(pipeline_mod.StageTimeoutError):
+        app.run_builder_instance(
+            crew=_Factory(),
+            builder_name="social_crew",
+            label="Social",
+            base_inputs={"topic": "x3p", "audience": "users"},
+            variant_count=1,
+        )
     elapsed = time.perf_counter() - start
 
     assert elapsed < 1.6
-    assert result["mock"] is True
-    assert "timed out" in (result.get("warning") or "").lower()

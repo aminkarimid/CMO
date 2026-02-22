@@ -5,9 +5,10 @@ import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import requests
 from crewai.tools import BaseTool, EnvVar
@@ -18,7 +19,12 @@ USER_AGENT = os.getenv(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 )
 CACHE_TTL = int(os.getenv("X3P_TOOL_CACHE_TTL", "900"))
+DEFAULT_TOOL_TIMEOUT_SEC = int(os.getenv("X3P_TOOL_TIMEOUT_SEC", "8"))
+MAX_RETRIES = int(os.getenv("X3P_TOOL_MAX_RETRIES", "1"))
 DOMAIN_REGEX = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+SITEMAP_LOC_RE = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE)
+TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 TIME_RANGE_MAP = {
     "past_24_hours": "day",
@@ -56,18 +62,45 @@ def _cache_put(tool: Any, key: str, value: Dict[str, Any]) -> None:
     _tool_cache(tool)[key] = {"ts": time.time(), "value": value}
 
 
-def _success(message: str, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {"status": "ok", "message": message, "data": data}
+def _success(message: str, data: List[Dict[str, Any]], **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"status": "ok", "message": message, "data": data}
+    payload.update(extra)
+    return payload
 
 
-def _error(message: str) -> Dict[str, Any]:
-    return {"status": "error", "message": message, "data": []}
+def _error(message: str, **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"status": "error", "message": message, "data": []}
+    payload.update(extra)
+    return payload
 
 
 def log_error(service: str, error: str) -> None:
     os.makedirs("runs", exist_ok=True)
     with open("runs/errors.log", "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now().isoformat()} - {service} - {error}\n")
+        f.write(f"{datetime.now(timezone.utc).isoformat()} - {service} - {error}\n")
+
+
+def _request_with_retry(
+    method: str,
+    url: str,
+    *,
+    timeout_sec: int = DEFAULT_TOOL_TIMEOUT_SEC,
+    max_retries: int = MAX_RETRIES,
+    **kwargs: Any,
+) -> requests.Response:
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return requests.request(method, url, timeout=timeout_sec, **kwargs)
+        except requests.Timeout as exc:
+            last_error = exc
+        except requests.RequestException as exc:
+            last_error = exc
+        if attempt < max_retries:
+            time.sleep(0.2 + random.random() * 0.25)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request failed without exception")
 
 
 def sanitize_tavily_args(
@@ -116,11 +149,33 @@ def sanitize_tavily_args(
     }
 
 
+def _domain_from_url(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def _clean_html_text(html: str, max_chars: int = 5000) -> str:
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = HTML_TAG_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def _extract_title(html: str) -> str:
+    m = TITLE_RE.search(html or "")
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", m.group(1)).strip()[:300]
+
+
 class TavilyTool(BaseTool):
     name: str = "tavily_tool"
     description: str = "Search the web via Tavily and return {title,url,snippet}."
     env_vars: List[EnvVar] = [
-        EnvVar(name="TAVILY_API_KEY", description="Tavily API key", required=True)
+        EnvVar(name="TAVILY_API_KEY", description="Tavily API key", required=True),
     ]
 
     def _run(
@@ -159,7 +214,8 @@ class TavilyTool(BaseTool):
             return cached
 
         try:
-            resp = requests.post(
+            resp = _request_with_retry(
+                "POST",
                 "https://api.tavily.com/search",
                 json=payload,
                 headers={
@@ -167,7 +223,6 @@ class TavilyTool(BaseTool):
                     "Content-Type": "application/json",
                     "User-Agent": USER_AGENT,
                 },
-                timeout=15,
             )
             resp.raise_for_status()
             rows = []
@@ -177,123 +232,21 @@ class TavilyTool(BaseTool):
                         "title": item.get("title", ""),
                         "url": item.get("url", ""),
                         "snippet": item.get("snippet", ""),
+                        "published_at": item.get("published_date") or item.get("published_at", ""),
+                        "domain": _domain_from_url(item.get("url", "")),
                     }
                 )
             result = _success(f"Retrieved {len(rows)} Tavily results for '{q}'.", rows)
             _cache_put(self, cache_key, result)
             return result
-        except Exception as e:
-            log_error("Tavily", str(e))
-            return _error(f"Tavily search failed: {e}")
-
-
-class SemanticScholarTool(BaseTool):
-    name: str = "semantic_scholar_tool"
-    description: str = "Search Semantic Scholar and return paper metadata."
-    env_vars: List[EnvVar] = [
-        EnvVar(name="SEMANTIC_SCHOLAR_KEY", description="Semantic Scholar API key", required=False)
-    ]
-
-    class SemanticScholarToolSchema(BaseModel):
-        query: str
-        limit: int = 5
-        fields: Optional[List[str]] = None
-        year_after: Optional[int] = None
-        year_before: Optional[int] = None
-
-    args_schema = SemanticScholarToolSchema
-
-    def _run(
-        self,
-        query: str,
-        limit: int = 5,
-        fields: Optional[List[str]] = None,
-        year_after: Optional[int] = None,
-        year_before: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {
-            "query": query,
-            "limit": max(1, min(limit, 20)),
-            "fields": ",".join(fields or ["title", "authors", "year", "url", "abstract", "doi"]),
-        }
-        if year_after is not None:
-            params["yearAfter"] = year_after
-        if year_before is not None:
-            params["yearBefore"] = year_before
-
-        headers = {"User-Agent": USER_AGENT}
-        key = os.getenv("SEMANTIC_SCHOLAR_KEY")
-        if key:
-            headers["x-api-key"] = key
-
-        try:
-            resp = requests.get(
-                "https://api.semanticscholar.org/graph/v1/paper/search",
-                params=params,
-                headers=headers,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            rows: List[Dict[str, Any]] = []
-            for p in (resp.json() or {}).get("data", []):
-                rows.append(
-                    {
-                        "title": p.get("title", ""),
-                        "authors": [a.get("name", "") for a in p.get("authors", [])],
-                        "year": p.get("year"),
-                        "url": p.get("url", ""),
-                        "abstract": p.get("abstract", ""),
-                        "doi": p.get("doi", ""),
-                    }
-                )
-            return _success(f"Found {len(rows)} Semantic Scholar papers for '{query}'.", rows)
-        except Exception as e:
-            log_error("Semantic Scholar", str(e))
-            return _error(f"Semantic Scholar search failed: {e}")
-
-
-class PubMedTool(BaseTool):
-    name: str = "pubmed_tool"
-    description: str = "Search PubMed and return {id,title,abstract}."
-
-    def _run(self, query: str, retmax: int = 5) -> Dict[str, Any]:
-        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
-        try:
-            search_url = f"{base}esearch.fcgi?db=pubmed&term={requests.utils.quote(query)}&retmode=json&retmax={max(1, min(retmax, 10))}"
-            ids_resp = requests.get(search_url, timeout=15)
-            ids_resp.raise_for_status()
-            ids = (ids_resp.json() or {}).get("esearchresult", {}).get("idlist", [])
-            rows: List[Dict[str, Any]] = []
-            for pid in ids:
-                try:
-                    fetch = requests.get(
-                        f"{base}efetch.fcgi?db=pubmed&id={pid}&retmode=xml",
-                        timeout=20,
-                    )
-                    fetch.raise_for_status()
-                    xml = fetch.text
-                    title = re.search(r"<ArticleTitle>(.*?)</ArticleTitle>", xml, re.DOTALL)
-                    abstract = re.search(r"<AbstractText.*?>(.*?)</AbstractText>", xml, re.DOTALL)
-                    rows.append(
-                        {
-                            "id": pid,
-                            "title": title.group(1).strip() if title else "",
-                            "abstract": abstract.group(1).strip() if abstract else "",
-                        }
-                    )
-                except Exception as inner:
-                    log_error("PubMed", f"efetch {pid} failed: {inner}")
-            if not rows:
-                return _error(f"No PubMed summaries fetched for '{query}'")
-            return _success(f"Fetched {len(rows)} PubMed summaries for '{query}'.", rows)
-        except Exception as e:
-            log_error("PubMed", str(e))
-            return _error(f"PubMed search failed: {e}")
+        except Exception as exc:
+            log_error("Tavily", str(exc))
+            return _error(f"Tavily search failed: {exc}")
 
 
 class SocialTrendsTool(BaseTool):
     name: str = "social_trends_tool"
-    description: str = "Collect social trend cues from X, Reddit, and Google Trends."
+    description: str = "Collect social trend cues from Reddit and web trend headlines."
 
     def _run(
         self,
@@ -304,130 +257,247 @@ class SocialTrendsTool(BaseTool):
         if isinstance(include_platforms, str):
             include_platforms = [p.strip() for p in include_platforms.split(",") if p.strip()]
 
-        platforms = {p.lower() for p in (include_platforms or ["x", "reddit", "google"])}
-        cache_key = json.dumps(
-            {"platforms": sorted(platforms), "limit": limit, "region": region},
-            sort_keys=True,
-        )
+        platforms = {p.lower() for p in (include_platforms or ["reddit", "web"])}
+        safe_limit = max(1, min(int(limit), 20))
+        cache_key = json.dumps({"platforms": sorted(platforms), "limit": safe_limit, "region": region}, sort_keys=True)
         cached = _cache_get(self, cache_key)
         if cached:
             return cached
 
         items: List[Dict[str, Any]] = []
+
         if "reddit" in platforms:
             try:
-                r = requests.get(
-                    f"https://www.reddit.com/r/popular.json?limit={max(1, min(limit, 20))}",
+                resp = _request_with_retry(
+                    "GET",
+                    f"https://www.reddit.com/r/popular.json?limit={safe_limit}",
                     headers={"User-Agent": USER_AGENT},
-                    timeout=10,
                 )
-                r.raise_for_status()
-                for child in (r.json() or {}).get("data", {}).get("children", []):
+                resp.raise_for_status()
+                for child in (resp.json() or {}).get("data", {}).get("children", []):
                     data = child.get("data") or {}
                     items.append(
                         {
                             "platform": "reddit",
                             "title": data.get("title", ""),
                             "url": f"https://www.reddit.com{data.get('permalink', '')}",
+                            "engagement": data.get("score"),
+                            "published_at": datetime.fromtimestamp(
+                                float(data.get("created_utc", 0) or 0), tz=timezone.utc
+                            ).isoformat()
+                            if data.get("created_utc")
+                            else "",
                         }
                     )
-            except Exception as e:
-                log_error("SocialTrends_Reddit", str(e))
+            except Exception as exc:
+                log_error("SocialTrends_Reddit", str(exc))
 
-        if not items:
-            region_label = region.replace("_", " ").title()
-            items = [
-                {
-                    "platform": "x",
-                    "topic": "#GoodJobs",
-                    "url": "https://twitter.com/hashtag/GoodJobs",
-                    "note": f"Trending discussion around wages and retention in {region_label}.",
-                },
-                {
-                    "platform": "google",
-                    "topic": "care workforce retention",
-                    "exploreUrl": "https://trends.google.com/trends/explore?q=care%20workforce%20retention",
-                },
-            ]
+        if "web" in platforms:
+            tavily_result = tavily_tool.run(
+                query=f"trending workforce and care economy topics in {region}",
+                max_results=safe_limit,
+                time_range="past_week",
+                search_depth="basic",
+            )
+            if str(tavily_result.get("status", "")).lower() == "ok":
+                for row in tavily_result.get("data", []):
+                    items.append(
+                        {
+                            "platform": "web",
+                            "title": row.get("title", ""),
+                            "url": row.get("url", ""),
+                            "snippet": row.get("snippet", ""),
+                            "published_at": row.get("published_at", ""),
+                            "domain": row.get("domain", _domain_from_url(row.get("url", ""))),
+                        }
+                    )
 
-        result = _success(f"Collected {len(items[:max(1, limit)])} social trend items", items[: max(1, limit)])
+        deduped: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            key = (str(item.get("platform", "")).lower(), str(item.get("url", "")).strip())
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        if not deduped:
+            return _error("No trend items were verified from live sources.")
+
+        result = _success(f"Collected {len(deduped[:safe_limit])} trend items from live sources.", deduped[:safe_limit])
         _cache_put(self, cache_key, result)
         return result
 
 
-class WorldBankTool(BaseTool):
-    name: str = "world_bank_tool"
-    description: str = "Fetch World Bank indicator series."
+class X3PSiteSnapshotTool(BaseTool):
+    name: str = "x3p_site_snapshot_tool"
+    description: str = "Fetch and summarize key x3p.ai pages and sitemap-discovered pages."
 
-    def _run(self, indicator_code: str, country: str = "WLD", date: str = "2015:2024", per_page: int = 60) -> Dict[str, Any]:
-        try:
-            resp = requests.get(
-                f"https://api.worldbank.org/v2/country/{country}/indicator/{indicator_code}",
-                params={"format": "json", "date": date, "per_page": per_page},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            rows: List[Dict[str, Any]] = []
-            if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
-                for row in data[1]:
-                    rows.append({"date": row.get("date"), "value": row.get("value")})
-            rows.sort(key=lambda x: int(x.get("date") or 0), reverse=True)
-            return _success(f"World Bank series {indicator_code} ({country})", rows)
-        except Exception as e:
-            log_error("WorldBank", str(e))
-            return _error(str(e))
+    class X3PSiteSnapshotSchema(BaseModel):
+        urls: Optional[Union[List[str], str]] = None
+        include_sitemap: bool = True
+        max_pages: int = 6
 
+    args_schema = X3PSiteSnapshotSchema
 
-class OECDTool(BaseTool):
-    name: str = "oecd_tool"
-    description: str = "Fetch OECD SDMX CSV rows."
+    def _run(
+        self,
+        urls: Optional[Union[List[str], str]] = None,
+        include_sitemap: bool = True,
+        max_pages: int = 6,
+    ) -> Dict[str, Any]:
+        safe_pages = max(1, min(int(max_pages), 20))
+        if isinstance(urls, str):
+            seed_urls = [u.strip() for u in urls.split(",") if u.strip()]
+        elif isinstance(urls, list):
+            seed_urls = [str(u).strip() for u in urls if str(u).strip()]
+        else:
+            seed_urls = ["https://x3p.ai", "https://x3p.ai/about", "https://x3p.ai/contact"]
 
-    def _run(self, dataset: str, key: str, time_range: str = "") -> Dict[str, Any]:
-        base = f"https://stats.oecd.org/sdmx-json/data/{dataset}/{key}"
-        if time_range:
-            base = f"https://stats.oecd.org/sdmx-json/data/{dataset}/{key},time={time_range}"
-        url = f"{base}?contentType=csv"
-        try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            lines = [ln for ln in resp.text.splitlines() if ln.strip()]
-            if len(lines) < 2:
-                return _error("Unexpected OECD CSV format")
-            headers = [h.strip().strip('"') for h in lines[0].split(",")]
-            rows = []
-            for ln in lines[1:]:
-                parts = [p.strip().strip('"') for p in ln.split(",")]
-                row = {headers[i]: (parts[i] if i < len(parts) else "") for i in range(len(headers))}
-                rows.append(row)
-            out: List[Dict[str, Any]] = []
-            for row in rows:
-                value = None
-                for key_name in ("OBS_VALUE", "Value", headers[-1]):
-                    if key_name in row:
-                        try:
-                            value = float(row[key_name])
-                            break
-                        except Exception:
-                            continue
-                if value is None:
-                    continue
-                out.append(
-                    {
-                        "time": row.get("TIME_PERIOD") or row.get("TIME") or row.get("Year"),
-                        "value": value,
-                        "raw_row": row,
-                    }
+        discovered: List[str] = []
+        if include_sitemap:
+            try:
+                sitemap_resp = _request_with_retry(
+                    "GET",
+                    "https://x3p.ai/sitemap.xml",
+                    headers={"User-Agent": USER_AGENT},
                 )
-            return _success(f"OECD {dataset}/{key} rows={len(out)}", out)
-        except Exception as e:
-            log_error("OECD", str(e))
-            return _error(f"OECD fetch failed: {e}")
+                if sitemap_resp.status_code == 200:
+                    discovered.extend(SITEMAP_LOC_RE.findall(sitemap_resp.text))
+            except Exception as exc:
+                log_error("X3PSnapshot_Sitemap", str(exc))
+
+        urls_final: List[str] = []
+        for url in [*seed_urls, *discovered]:
+            normalized = str(url).strip()
+            if not normalized.startswith("https://x3p.ai"):
+                continue
+            if normalized not in urls_final:
+                urls_final.append(normalized)
+            if len(urls_final) >= safe_pages:
+                break
+
+        pages: List[Dict[str, Any]] = []
+        for url in urls_final:
+            try:
+                resp = _request_with_retry(
+                    "GET",
+                    url,
+                    headers={"User-Agent": USER_AGENT},
+                )
+                status = resp.status_code
+                html = resp.text or ""
+                page = {
+                    "url": url,
+                    "http_status": status,
+                    "title": _extract_title(html),
+                    "text": _clean_html_text(html, max_chars=8000),
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+                pages.append(page)
+            except Exception as exc:
+                log_error("X3PSnapshot_Page", f"{url}: {exc}")
+
+        if not pages:
+            return _error("Unable to fetch x3p.ai pages for snapshot.")
+        return _success(
+            f"Fetched {len(pages)} x3p.ai pages.",
+            pages,
+            metadata={"source_count": len(pages)},
+        )
+
+
+class TrendVerifierTool(BaseTool):
+    name: str = "trend_verifier_tool"
+    description: str = "Verify trend claims with fresh multi-source evidence and reject weak claims."
+
+    class TrendVerifierToolSchema(BaseModel):
+        query: str
+        region: str = "united-states"
+        recency_days: int = 7
+        min_sources: int = 2
+        max_results: int = 8
+
+    args_schema = TrendVerifierToolSchema
+
+    def _run(
+        self,
+        query: str,
+        region: str = "united-states",
+        recency_days: int = 7,
+        min_sources: int = 2,
+        max_results: int = 8,
+    ) -> Dict[str, Any]:
+        q = (query or "").strip()
+        if not q:
+            return _error("Trend query is required.")
+
+        safe_min_sources = max(2, min(int(min_sources), 5))
+        safe_max_results = max(2, min(int(max_results), 20))
+        if recency_days <= 1:
+            time_range = "past_day"
+        elif recency_days <= 7:
+            time_range = "past_week"
+        elif recency_days <= 31:
+            time_range = "past_month"
+        else:
+            time_range = "past_year"
+
+        tavily_result = tavily_tool.run(
+            query=f"{q} {region} trend",
+            max_results=safe_max_results,
+            time_range=time_range,
+            search_depth="advanced",
+        )
+        if str(tavily_result.get("status", "")).lower() != "ok":
+            return _error(f"Trend verification failed: {tavily_result.get('message', 'Tavily unavailable')}")
+
+        unique_by_domain: Dict[str, Dict[str, Any]] = {}
+        for row in tavily_result.get("data", []):
+            url = str(row.get("url", "")).strip()
+            domain = row.get("domain") or _domain_from_url(url)
+            if not url or not domain:
+                continue
+            if domain in unique_by_domain:
+                continue
+            unique_by_domain[domain] = {
+                "title": row.get("title", ""),
+                "url": url,
+                "snippet": row.get("snippet", ""),
+                "published_at": row.get("published_at", ""),
+                "domain": domain,
+            }
+            if len(unique_by_domain) >= safe_max_results:
+                break
+
+        evidence = list(unique_by_domain.values())
+        if len(evidence) < safe_min_sources:
+            return _error(
+                f"Insufficient verified sources for trend claim ({len(evidence)}/{safe_min_sources}).",
+                metadata={
+                    "query": q,
+                    "region": region,
+                    "source_count": len(evidence),
+                    "required_sources": safe_min_sources,
+                },
+            )
+
+        return _success(
+            f"Verified trend evidence with {len(evidence)} independent sources.",
+            evidence,
+            metadata={
+                "query": q,
+                "region": region,
+                "source_count": len(evidence),
+                "required_sources": safe_min_sources,
+                "recency_days": recency_days,
+            },
+        )
 
 
 class BrandRetrieverTool(BaseTool):
     name: str = "brand_retriever_tool"
-    description: str = "Retrieve relevant snippets from brand guide and recent outputs."
+    description: str = "Retrieve relevant snippets from brand guide, brand snapshot, and recent outputs."
 
     def _run(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         try:
@@ -441,14 +511,22 @@ class BrandRetrieverTool(BaseTool):
             if guide_path.exists():
                 corpus.append((str(guide_path), guide_path.read_text(encoding="utf-8")))
 
+            brand_brief = base.parent / "runs" / "brand_intel" / "brief_latest.json"
+            if brand_brief.exists():
+                try:
+                    brief_data = json.loads(brand_brief.read_text(encoding="utf-8"))
+                    corpus.append((str(brand_brief), json.dumps(brief_data, ensure_ascii=False)))
+                except Exception:
+                    pass
+
             outputs_dir = base.parent / "outputs"
             for sub in ("blog", "social", "brand"):
                 p = outputs_dir / sub
                 if not p.exists():
                     continue
-                for f in sorted(p.glob("*.md"), reverse=True)[:2]:
+                for file_path in sorted(p.glob("*.md"), reverse=True)[:2]:
                     try:
-                        corpus.append((str(f), f.read_text(encoding="utf-8")))
+                        corpus.append((str(file_path), file_path.read_text(encoding="utf-8")))
                     except Exception:
                         continue
 
@@ -459,35 +537,36 @@ class BrandRetrieverTool(BaseTool):
                     p_tokens = re.findall(r"[a-zA-Z0-9]+", para.lower())
                     overlap = len(tokens.intersection(p_tokens))
                     if overlap:
-                        scored.append((float(overlap), src, para[:800]))
+                        scored.append((float(overlap), src, para[:900]))
 
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[: max(1, min(top_k, 10))]
             if not top and corpus:
-                return _success("No strong matches; returning brand guide excerpt", [{"source": corpus[0][0], "snippet": corpus[0][1][:800]}])
+                return _success(
+                    "No strong matches; returning brand guide excerpt",
+                    [{"source": corpus[0][0], "snippet": corpus[0][1][:900]}],
+                )
             return _success(
                 f"Retrieved {len(top)} brand snippets for query",
-                [{"source": s, "snippet": p} for _, s, p in top],
+                [{"source": src, "snippet": snippet} for _, src, snippet in top],
             )
-        except Exception as e:
-            log_error("BrandRetriever", str(e))
-            return _error(str(e))
+        except Exception as exc:
+            log_error("BrandRetriever", str(exc))
+            return _error(str(exc))
 
 
 tavily_tool = TavilyTool()
-semantic_scholar_tool = SemanticScholarTool()
-pubmed_tool = PubMedTool()
 social_trends_tool = SocialTrendsTool()
-world_bank_tool = WorldBankTool()
-oecd_tool = OECDTool()
+x3p_site_snapshot_tool = X3PSiteSnapshotTool()
+trend_verifier_tool = TrendVerifierTool()
 brand_retriever_tool = BrandRetrieverTool()
 
 __all__ = [
+    "USER_AGENT",
+    "sanitize_tavily_args",
     "tavily_tool",
-    "semantic_scholar_tool",
-    "pubmed_tool",
     "social_trends_tool",
-    "world_bank_tool",
-    "oecd_tool",
+    "x3p_site_snapshot_tool",
+    "trend_verifier_tool",
     "brand_retriever_tool",
 ]

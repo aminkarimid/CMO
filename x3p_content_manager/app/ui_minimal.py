@@ -9,7 +9,8 @@ from typing import Any
 
 import streamlit as st
 
-from x3p_content_manager.app.backend_health import apply_runtime_backend, preflight_backend
+from x3p_content_manager.app.backend_health import apply_runtime_backend
+from x3p_content_manager.app.brand_intel import load_brand_snapshot, refresh_brand_snapshot
 from x3p_content_manager.app.errors import normalize_generation_error
 from x3p_content_manager.app.input_contract import (
     DEFAULT_KEY_FACTS_TEXT,
@@ -18,12 +19,11 @@ from x3p_content_manager.app.input_contract import (
     default_inputs,
 )
 from x3p_content_manager.app.pipeline import (
-    build_mock_blog_content,
-    build_mock_social_content,
     is_runtime_configuration_error,
     run_pipeline_with_quality_gate,
 )
 from x3p_content_manager.app.progress import LiveProgress
+from x3p_content_manager.app.runtime_health import run_preflight_checks
 from x3p_content_manager.app.template_guard import build_template_safe_inputs, missing_template_vars
 from x3p_content_manager.crew import X3PCareContentCrew
 from x3p_content_manager.main import load_default_brand_guide
@@ -49,7 +49,15 @@ def ensure_dirs() -> None:
 
 def get_runtime_crew(force_refresh: bool = False) -> X3PCareContentCrew:
     """Session-local crew instance that can be refreshed on runtime mismatch."""
-    version = str((Path(__file__).resolve().parents[1] / "crew.py").stat().st_mtime_ns)
+    base = Path(__file__).resolve().parents[1]
+    version_parts = []
+    for rel in ("crew.py", "tools.py", "config/agents.yaml", "config/tasks.yaml"):
+        path = base / rel
+        try:
+            version_parts.append(f"{rel}:{path.stat().st_mtime_ns}")
+        except Exception:
+            version_parts.append(f"{rel}:missing")
+    version = "|".join(version_parts)
     needs_refresh = (
         force_refresh
         or st.session_state.get("_x3p_crew_instance") is None
@@ -145,6 +153,11 @@ def write_run_manifest(
     files: list[str],
     usage_bundle: dict | None,
     settings: dict | None = None,
+    health_report: dict | None = None,
+    brand_snapshot_meta: dict | None = None,
+    trend_brief_meta: dict | None = None,
+    stage_durations: dict | None = None,
+    failure_reasons: list[str] | None = None,
 ) -> str | None:
     try:
         data = {
@@ -159,6 +172,11 @@ def write_run_manifest(
             "files": files,
             "usage": usage_bundle or {},
             "settings": settings or {},
+            "health_report": health_report or {},
+            "brand_snapshot_meta": brand_snapshot_meta or {},
+            "trend_brief_meta": trend_brief_meta or {},
+            "stage_durations": stage_durations or {},
+            "failure_reasons": failure_reasons or [],
         }
         path = Path("runs") / f"manifest_{run_id}.json"
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -180,6 +198,21 @@ def run_qa_checks(text: str, pipeline: str, inputs: dict) -> list[dict[str, Any]
     found = sorted([w for w in banned if w in (text or "").lower()])
     rows.append({"name": "Banned words", "ok": len(found) == 0, "details": ", ".join(found) if found else "None"})
     return rows
+
+
+def _dedupe_messages(messages: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for msg in messages:
+        clean = str(msg or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(clean)
+    return ordered
 
 
 def _resolve_initial_theme() -> str:
@@ -351,6 +384,37 @@ def _theme_css(theme: str) -> str:
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }}
+  .mini-health {{
+    border: 1px solid var(--card-border);
+    background: linear-gradient(180deg, var(--card), rgba(255,255,255,0.01));
+    border-radius: 14px;
+    padding: 0.78rem 0.92rem;
+    margin: 0.2rem 0 0.8rem 0;
+    box-shadow: 0 10px 24px var(--card-shadow);
+  }}
+  .mini-health-grid {{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin-top: 0.45rem;
+  }}
+  .mini-health-item {{
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 0.45rem 0.52rem;
+    background: rgba(255,255,255,0.01);
+  }}
+  .mini-health-item strong {{
+    display: block;
+    font-size: 0.76rem;
+    color: var(--text-1);
+    margin-bottom: 0.1rem;
+  }}
+  .mini-health-item span {{
+    font-size: 0.86rem;
+    color: var(--text-0);
+    overflow-wrap: anywhere;
+  }}
   .mini-cap-grid {{
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -495,6 +559,9 @@ def _theme_css(theme: str) -> str:
     .mini-cap-grid {{
       grid-template-columns: 1fr;
     }}
+    .mini-health-grid {{
+      grid-template-columns: 1fr 1fr;
+    }}
     [data-testid="stHorizontalBlock"] {{
       flex-direction: column;
     }}
@@ -527,6 +594,9 @@ def _theme_css(theme: str) -> str:
     }}
     .mini-form {{
       padding: 0.78rem;
+    }}
+    .mini-health-grid {{
+      grid-template-columns: 1fr;
     }}
     .stButton > button {{
       min-height: 46px;
@@ -571,6 +641,18 @@ def render_minimal_customer_ui() -> None:
         st.session_state["ui_theme"] = _resolve_initial_theme()
     if "ui_theme_toggle" not in st.session_state:
         st.session_state["ui_theme_toggle"] = "Dark" if st.session_state["ui_theme"] == "dark" else "Light"
+    if "health_report_cache" not in st.session_state:
+        try:
+            st.session_state["health_report_cache"] = run_preflight_checks().to_dict()
+        except Exception as exc:
+            st.session_state["health_report_cache"] = {
+                "ok": False,
+                "message": f"Health check failed: {type(exc).__name__}",
+                "checks": [],
+                "backend": {"ok": False, "provider": "openai", "message": str(exc), "details": {}},
+            }
+    if "brand_snapshot_cache" not in st.session_state:
+        st.session_state["brand_snapshot_cache"] = load_brand_snapshot().to_dict()
 
     _render_css(st.session_state["ui_theme"])
 
@@ -618,6 +700,46 @@ def render_minimal_customer_ui() -> None:
         unsafe_allow_html=True,
     )
 
+    health_controls_left, health_controls_right = st.columns([5, 1])
+    with health_controls_right:
+        if st.button("Refresh health", key="mini_refresh_health", use_container_width=True):
+            try:
+                st.session_state["health_report_cache"] = run_preflight_checks().to_dict()
+            except Exception as exc:
+                st.session_state["health_report_cache"] = {
+                    "ok": False,
+                    "message": f"Health refresh failed: {type(exc).__name__}",
+                    "checks": [],
+                    "backend": {"ok": False, "provider": "openai", "message": str(exc), "details": {}},
+                }
+    with health_controls_left:
+        health_data = st.session_state.get("health_report_cache", {}) or {}
+        backend_data = health_data.get("backend", {}) if isinstance(health_data, dict) else {}
+        checks = health_data.get("checks", []) if isinstance(health_data, dict) else []
+        tool_ok = sum(1 for check in checks if check.get("ok")) if isinstance(checks, list) else 0
+        tool_total = len(checks) if isinstance(checks, list) else 0
+        brand_cache = st.session_state.get("brand_snapshot_cache", {}) or {}
+        brand_age = float(brand_cache.get("age_hours") or 0.0)
+        brand_sources = int(brand_cache.get("source_count") or 0)
+        brand_label = "Not ready" if brand_age > 5000 else f"{brand_age:.1f}h old"
+        health_state = "Healthy" if health_data.get("ok") else "Needs attention"
+        st.markdown(
+            f"""
+            <div class="mini-health">
+              <p class="mini-form-title">System health</p>
+              <div class="mini-health-grid">
+                <div class="mini-health-item"><strong>Status</strong><span>{health_state}</span></div>
+                <div class="mini-health-item"><strong>LLM</strong><span>{backend_data.get("provider", "openai")} · {"OK" if backend_data.get("ok") else "Fail"}</span></div>
+                <div class="mini-health-item"><strong>Tools</strong><span>{tool_ok}/{tool_total} checks passed</span></div>
+                <div class="mini-health-item"><strong>x3p.ai Context</strong><span>{brand_label} · {brand_sources} sources</span></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if health_data.get("message"):
+            st.caption(str(health_data.get("message")))
+
     pipeline_labels = {
         "Complete package": "Run All",
         "Blog only": "Blog",
@@ -662,17 +784,36 @@ def render_minimal_customer_ui() -> None:
     show_full_quality = bool(st.session_state.get("mini_show_quality", False))
     preferred_title = st.session_state.get("preferred_title", "")
     angle_choice = st.session_state.get("angle_choice", "")
+    trend_window_days = int(st.session_state.get("mini_trend_window_days", defaults.get("trend_window_days", 7)))
+    manual_brand_refresh = False
 
     with st.expander("Advanced options", expanded=False):
         key_facts_text = st.text_area("Key facts (one per line)", value=DEFAULT_KEY_FACTS_TEXT, height=120, key="mini_key_facts")
         if pipeline in {"Run All", "Social"}:
             variants = st.slider("Social variants", 1, 3, 1, key="mini_variants")
+            trend_window_days = st.slider("Trend recency window (days)", 1, 30, trend_window_days, key="mini_trend_window_days")
         show_full_quality = st.checkbox("Show full quality report", value=show_full_quality, key="mini_show_quality")
         preferred_title = st.text_input("Preferred title (optional)", value=preferred_title, key="mini_preferred_title")
         angle_choice = st.text_input("Angle (optional)", value=angle_choice, key="mini_angle_choice")
+        manual_brand_refresh = st.button("Refresh x3p.ai context now", key="mini_refresh_brand_context")
+        brand_cache = st.session_state.get("brand_snapshot_cache", {}) or {}
+        brand_age = float(brand_cache.get("age_hours") or 0.0)
+        age_label = "Not ready" if brand_age > 5000 else f"{brand_age:.1f}h"
+        st.caption(
+            f"Current context snapshot age: {age_label} "
+            f"({int(brand_cache.get('source_count') or 0)} sources)"
+        )
 
     run_btn = st.button("Generate content", type="primary", use_container_width=True, key="mini_run")
     st.markdown("</div>", unsafe_allow_html=True)
+
+    if manual_brand_refresh:
+        try:
+            refreshed = refresh_brand_snapshot(force=True, max_age_hours=24)
+            st.session_state["brand_snapshot_cache"] = refreshed.to_dict()
+            st.success("x3p.ai brand context refreshed.")
+        except Exception as exc:
+            st.warning(f"Unable to refresh x3p.ai context: {exc}")
 
     st.markdown(
         """
@@ -695,15 +836,36 @@ def render_minimal_customer_ui() -> None:
     )
 
     if run_btn:
-        preflight = preflight_backend()
-        if not preflight.ok:
-            st.error(preflight.message)
-            st.caption("Generation did not start. Fix backend setup and retry.")
+        try:
+            health_report = run_preflight_checks()
+            health_report_dict = health_report.to_dict()
+            st.session_state["health_report_cache"] = health_report_dict
+        except Exception as exc:
+            st.error(f"System preflight failed: {type(exc).__name__}")
+            st.caption("Technical details were logged to runs/errors.log.")
+            log_error(f"HealthReportError: {type(exc).__name__}: {exc}")
+            return
+
+        if not health_report.ok:
+            st.error(health_report.message)
+            failed_checks = [c for c in health_report.checks if c.critical and not c.ok]
+            for check in failed_checks:
+                st.caption(f"- {check.name}: {check.message}")
+            st.caption("Generation did not start. Resolve critical health checks and retry.")
         else:
-            runtime_backend_warning = apply_runtime_backend(preflight)
+            runtime_backend_warning = apply_runtime_backend(health_report.backend)
             try:
                 with st.spinner("Generating content..."):
                     start_ts = datetime.now()
+                    recovered_events: list[str] = []
+                    if runtime_backend_warning:
+                        recovered_events.append(runtime_backend_warning)
+
+                    brand_snapshot = refresh_brand_snapshot(force=False, max_age_hours=24)
+                    st.session_state["brand_snapshot_cache"] = brand_snapshot.to_dict()
+                    for warning in brand_snapshot.warnings:
+                        recovered_events.append(warning)
+
                     inputs = default_inputs()
                     inputs["topic"] = (topic or inputs["topic"]).strip()
                     inputs["audience"] = (audience or inputs["audience"]).strip()
@@ -712,13 +874,12 @@ def render_minimal_customer_ui() -> None:
                     inputs["key_facts"] = [line.strip() for line in (key_facts_text or "").splitlines() if line.strip()]
                     inputs["preferred_title"] = (preferred_title or "").strip()
                     inputs["angle_choice"] = (angle_choice or "").strip()
+                    inputs["trend_window_days"] = int(trend_window_days)
+                    inputs["brand_snapshot"] = json.dumps(brand_snapshot.brief, ensure_ascii=False)
 
                     st.session_state["preferred_title"] = inputs["preferred_title"]
                     st.session_state["angle_choice"] = inputs["angle_choice"]
 
-                    recovered_events: list[str] = []
-                    if runtime_backend_warning:
-                        recovered_events.append(runtime_backend_warning)
                     missing_keys = missing_template_vars(inputs)
                     if missing_keys:
                         recovered_events.append("Recovered missing input keys automatically.")
@@ -748,12 +909,21 @@ def render_minimal_customer_ui() -> None:
                                 variants,
                                 live,
                             )
+                        elif isinstance(run_exc, KeyError):
+                            crew = get_runtime_crew(force_refresh=True)
+                            recovered_events.append("Recovered cached crew/tool mismatch and retried automatically.")
+                            text, payload, usage, pipeline_warnings = run_pipeline_with_quality_gate(
+                                crew,
+                                pipeline,
+                                inputs,
+                                variants,
+                                live,
+                            )
                         else:
                             raise
 
                     if not (isinstance(text, str) and text.strip()):
-                        text = build_mock_social_content(inputs["topic"], inputs["audience"]) if pipeline == "Social" else build_mock_blog_content(inputs["topic"], inputs["audience"])
-                        payload = payload or {"output": text}
+                        raise RuntimeError("Pipeline returned empty output.")
 
                     json_path = save_json(payload, subfolder)
                     md_path = save_markdown(text, subfolder, base_name)
@@ -783,8 +953,31 @@ def render_minimal_customer_ui() -> None:
                             run_full_quality_checks(pipeline)
                             if QUALITY_REPORT_PATH.exists():
                                 st.session_state.last_files.append(str(QUALITY_REPORT_PATH))
-                        except Exception as e:
-                            pipeline_warnings.append(f"Full quality report failed: {e}")
+                        except Exception as exc:
+                            pipeline_warnings.append(f"Full quality report failed: {exc}")
+
+                    trend_payload = {}
+                    if isinstance(payload, dict):
+                        candidate = payload.get("Trend Intel")
+                        if isinstance(candidate, dict):
+                            trend_payload = candidate
+                    kept_claims = trend_payload.get("kept_claims", []) if isinstance(trend_payload, dict) else []
+                    dropped_claims = trend_payload.get("dropped_claims", []) if isinstance(trend_payload, dict) else []
+                    trend_brief_meta = {
+                        "claim_count": len(kept_claims) + len(dropped_claims),
+                        "verified_count": len(kept_claims),
+                        "dropped_count": len(dropped_claims),
+                    }
+                    brand_snapshot_meta = {
+                        "captured_at": brand_snapshot.captured_at,
+                        "age_hours": round(float(brand_snapshot.age_hours), 2),
+                        "source_count": int(brand_snapshot.source_count),
+                    }
+                    stage_durations = {
+                        stage: details.get("duration_ms")
+                        for stage, details in (usage or {}).items()
+                        if isinstance(details, dict) and "duration_ms" in details
+                    }
 
                     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                     settings = {
@@ -793,10 +986,10 @@ def render_minimal_customer_ui() -> None:
                         "variants": int(variants),
                         "recovered_errors": sorted(set(recovered_events)),
                         "backend_status": {
-                            "ok": preflight.ok,
-                            "provider": preflight.provider,
-                            "message": preflight.message,
-                            "details": preflight.details,
+                            "ok": health_report.backend.ok,
+                            "provider": health_report.backend.provider,
+                            "message": health_report.backend.message,
+                            "details": health_report.backend.details,
                         },
                     }
                     manifest_path = write_run_manifest(
@@ -806,6 +999,11 @@ def render_minimal_customer_ui() -> None:
                         files=st.session_state.last_files,
                         usage_bundle=usage if isinstance(usage, dict) else {},
                         settings=settings,
+                        health_report=health_report_dict,
+                        brand_snapshot_meta=brand_snapshot_meta,
+                        trend_brief_meta=trend_brief_meta,
+                        stage_durations=stage_durations,
+                        failure_reasons=[],
                     )
                     if manifest_path:
                         st.session_state.last_files.append(manifest_path)
@@ -814,15 +1012,34 @@ def render_minimal_customer_ui() -> None:
                     remember_run(pipeline, inputs, text)
                     log_telemetry(pipeline=pipeline, success=True, tokens=usage if isinstance(usage, dict) else {}, message="Run complete")
 
-                    for warning in recovered_events + pipeline_warnings:
+                    for warning in _dedupe_messages(recovered_events + pipeline_warnings):
                         st.warning(f"⚠️ {warning}")
 
                     duration = (datetime.now() - start_ts).total_seconds()
                     st.success(f"Generation complete in {duration:.1f}s.")
-            except Exception as e:
-                log_error(f"{type(e).__name__}: {e}")
-                log_telemetry(pipeline=pipeline, success=False, message=str(e))
-                st.error(normalize_generation_error(e))
+            except Exception as exc:
+                log_error(f"{type(exc).__name__}: {exc}")
+                log_telemetry(pipeline=pipeline, success=False, message=str(exc))
+                failure_usage = usage if "usage" in locals() and isinstance(usage, dict) else {}
+                failure_stage_durations = {
+                    stage: details.get("duration_ms")
+                    for stage, details in failure_usage.items()
+                    if isinstance(details, dict) and "duration_ms" in details
+                }
+                write_run_manifest(
+                    datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    pipeline=pipeline,
+                    inputs=inputs if "inputs" in locals() and isinstance(inputs, dict) else default_inputs(),
+                    files=[],
+                    usage_bundle=failure_usage,
+                    settings={"ui_mode": "minimal_v2", "pipeline": pipeline, "failed": True},
+                    health_report=health_report_dict,
+                    brand_snapshot_meta=st.session_state.get("brand_snapshot_cache", {}),
+                    trend_brief_meta={},
+                    stage_durations=failure_stage_durations,
+                    failure_reasons=[f"{type(exc).__name__}: {exc}"],
+                )
+                st.error(normalize_generation_error(exc))
                 st.caption("Technical details were logged to runs/errors.log.")
 
     if st.session_state.get("last_text"):

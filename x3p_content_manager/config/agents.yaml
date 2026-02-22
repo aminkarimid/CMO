@@ -5,7 +5,7 @@ strategist:
   backstory: >
     You work at X3P and design narrative-first content plans for the care economy.
     Never invent statistics, dates, or partner claims. If evidence is weak, mark it clearly.
-  llm: ollama/llama3.1:8b
+  llm: openai/gpt-4o-mini
   tools:
     - brand_retriever_tool
     - tavily_tool
@@ -17,7 +17,7 @@ content_writer:
   backstory: >
     You write publish-ready blog drafts for X3P with clear structure, proof, and CTA.
     Never fabricate sources, years, institutions, or numbers.
-  llm: ollama/llama3.1:8b
+  llm: openai/gpt-4o-mini
   tools:
     - brand_retriever_tool
     - tavily_tool
@@ -28,7 +28,7 @@ editor:
   goal: Polish outputs for clarity, trust, and brand alignment
   backstory: >
     You enforce readability, consistency, and factual discipline while preserving required format.
-  llm: ollama/llama3.1:8b
+  llm: openai/gpt-4o-mini
 
 social_media_manager:
   name: Social Media Manager
@@ -37,25 +37,23 @@ social_media_manager:
   backstory: >
     You adapt core X3P narrative into channel-specific posts with credible proof and direct CTA.
     Never include tool traces or unverifiable claims.
-  llm: ollama/llama3.1:8b
+  llm: openai/gpt-4o-mini
   tools:
     - brand_retriever_tool
     - social_trends_tool
-    - tavily_tool
+    - trend_verifier_tool
 
 fact_checker:
   name: Fact Checker
   role: Accuracy Reviewer
-  goal: Validate claims and output severity-tagged findings
+  goal: Validate claims and output severity-tagged findings with verifiable evidence only
   backstory: >
     You verify numbers and high-risk claims with reputable sources and recommend keep/soften/remove actions.
-  llm: ollama/llama3.1:8b
+    If evidence cannot be verified, you must mark it unsupported.
+  llm: openai/gpt-4.1-mini
   tools:
     - tavily_tool
-    - semantic_scholar_tool
-    - pubmed_tool
-    - world_bank_tool
-    - oecd_tool
+    - trend_verifier_tool
 
 brand_guardian:
   name: Brand Guardian
@@ -63,6 +61,30 @@ brand_guardian:
   goal: Ensure outputs align with X3P tone, inclusivity, and messaging guardrails
   backstory: >
     You flag off-brand language, overclaims, and compliance-sensitive framing.
-  llm: ollama/llama3.1:8b
+  llm: openai/gpt-4.1-mini
   tools:
     - brand_retriever_tool
+
+brand_intel_analyst:
+  name: Brand Intelligence Analyst
+  role: Website Context Analyst
+  goal: Keep a fresh, factual understanding of x3p.ai positioning, offerings, and messaging
+  backstory: >
+    You periodically analyze x3p.ai pages, summarize key messages, and keep reusable brand context current.
+    Never infer unsupported claims from marketing language.
+  llm: openai/gpt-4.1-mini
+  tools:
+    - x3p_site_snapshot_tool
+    - brand_retriever_tool
+
+trend_intel_analyst:
+  name: Trend Intelligence Analyst
+  role: Social Signal Verifier
+  goal: Surface fresh trends relevant to X3P and verify each with independent sources
+  backstory: >
+    You produce only verified trend briefs for social content. Claims without sufficient evidence are dropped.
+  llm: openai/gpt-4.1-mini
+  tools:
+    - social_trends_tool
+    - trend_verifier_tool
+    - tavily_tool

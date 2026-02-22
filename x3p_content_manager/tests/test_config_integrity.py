@@ -15,8 +15,12 @@ def test_agents_and_tasks_are_core_scope_only():
         "social_media_manager",
         "fact_checker",
         "brand_guardian",
+        "brand_intel_analyst",
+        "trend_intel_analyst",
     }
     allowed_tasks = {
+        "brand_intel_refresh_task",
+        "trend_brief_task",
         "strategy_outline_task",
         "writing_task",
         "editing_task",

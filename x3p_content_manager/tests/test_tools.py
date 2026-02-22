@@ -1,6 +1,10 @@
-import requests
-
-from x3p_content_manager.tools import tavily_tool, semantic_scholar_tool, pubmed_tool
+from x3p_content_manager.tools import (
+    brand_retriever_tool,
+    social_trends_tool,
+    tavily_tool,
+    trend_verifier_tool,
+    x3p_site_snapshot_tool,
+)
 
 
 def test_tavily_tool_missing_key_returns_error(monkeypatch):
@@ -10,49 +14,39 @@ def test_tavily_tool_missing_key_returns_error(monkeypatch):
     assert "TAVILY_API_KEY" in result["message"]
 
 
-def test_semantic_scholar_tool_handles_request_errors(monkeypatch):
-    def _raise(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-        raise requests.RequestException("boom")
+def test_social_trends_returns_error_when_sources_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        tavily_tool,
+        "run",
+        lambda **_kwargs: {"status": "error", "message": "down", "data": []},
+    )
 
-    monkeypatch.setattr(requests, "get", _raise)
-    result = semantic_scholar_tool.run(query="x3p")
+    result = social_trends_tool.run(include_platforms="web", limit=2)
     assert result["status"] == "error"
-    assert "Semantic Scholar" in result["message"]
+    assert "No trend items were verified" in result["message"]
 
 
-def test_semantic_scholar_tool_uses_api_key(monkeypatch):
-    monkeypatch.setenv("SEMANTIC_SCHOLAR_KEY", "sekret")
-
-    captured = {}
-
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"data": []}
-
-    def _fake_get(url, params=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
-        captured["url"] = url
-        captured["headers"] = headers or {}
-        captured["params"] = params or {}
-        return _Resp()
-
-    monkeypatch.setattr(requests, "get", _fake_get)
-
-    semantic_scholar_tool.run(query="care economy", limit=1)
-
-    assert captured["url"].endswith("/paper/search")
-    assert captured["headers"].get("x-api-key") == "sekret"
-    assert captured["params"]["limit"] == 1
-
-
-
-def test_pubmed_tool_handles_request_errors(monkeypatch):
-    def _raise(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-        raise requests.RequestException("fail")
-
-    monkeypatch.setattr(requests, "get", _raise)
-    result = pubmed_tool.run(query="care")
+def test_trend_verifier_requires_multiple_sources(monkeypatch):
+    monkeypatch.setattr(
+        tavily_tool,
+        "run",
+        lambda **_kwargs: {"status": "ok", "data": [{"url": "https://example.com", "domain": "example.com"}]},
+    )
+    result = trend_verifier_tool.run(query="care workforce", min_sources=2, max_results=4)
     assert result["status"] == "error"
-    assert "PubMed" in result["message"]
+    assert "Insufficient verified sources" in result["message"]
+
+
+def test_x3p_site_snapshot_handles_fetch_failure(monkeypatch):
+    monkeypatch.setattr(
+        x3p_site_snapshot_tool,
+        "_run",
+        lambda **_kwargs: {"status": "error", "message": "Unable to fetch x3p.ai pages for snapshot.", "data": []},
+    )
+    result = x3p_site_snapshot_tool.run()
+    assert result["status"] == "error"
+
+
+def test_brand_retriever_requires_query():
+    result = brand_retriever_tool.run(query="")
+    assert result["status"] == "error"
