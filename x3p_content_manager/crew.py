@@ -114,6 +114,10 @@ class X3PCareContentCrew:
 
     # Tasks
     @task
+    def topic_generation_task(self) -> Task:
+        return Task(config=self.tasks_config["topic_generation_task"])
+
+    @task
     def brand_intel_refresh_task(self) -> Task:
         return Task(
             config=self.tasks_config["brand_intel_refresh_task"],
@@ -235,6 +239,16 @@ class X3PCareContentCrew:
         return Crew(
             agents=[self.brand_guardian()],
             tasks=[self.brandcheck_task()],
+            process=Process.sequential,
+            memory=False,
+            verbose=True,
+        )
+
+    @crew
+    def topic_crew(self) -> Crew:
+        return Crew(
+            agents=[self.strategist()],
+            tasks=[self.topic_generation_task()],
             process=Process.sequential,
             memory=False,
             verbose=True,

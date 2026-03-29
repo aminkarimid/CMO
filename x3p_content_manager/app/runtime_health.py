@@ -199,6 +199,30 @@ def _probe_x3p_site(timeout_sec: int = 6) -> HealthCheck:
         )
 
 
+def _probe_supabase() -> HealthCheck:
+    from x3p_content_manager.supabase_publisher import SupabasePublisher
+
+    publisher = SupabasePublisher()
+    if not publisher.is_configured():
+        return HealthCheck(
+            name="supabase",
+            ok=False,
+            message="Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY missing).",
+            critical=False,
+            details={"failure_reason": "not_configured"},
+        )
+    start = time.perf_counter()
+    ok, message = publisher.health_check()
+    latency = (time.perf_counter() - start) * 1000
+    return HealthCheck(
+        name="supabase",
+        ok=ok,
+        message=message,
+        critical=False,
+        latency_ms=latency,
+    )
+
+
 def run_preflight_checks() -> HealthReport:
     checked_at = datetime.now(timezone.utc).isoformat()
     backend_status = preflight_backend()
@@ -210,6 +234,7 @@ def run_preflight_checks() -> HealthReport:
                 _probe_tavily(),
                 _probe_x3p_site(),
                 _probe_brand_retriever(),
+                _probe_supabase(),
             ]
         )
 

@@ -74,4 +74,15 @@ def remember_run(pipeline: str, inputs: Optional[Dict[str, Any]], text: Optional
     append_memory_entry(entry)
 
 
-__all__ = ["append_memory_entry", "load_memory", "remember_run"]
+def get_recent_topics(limit: int = 20) -> List[str]:
+    """Return a list of topic strings from recent memory entries."""
+    entries = load_memory(limit=limit)
+    topics: List[str] = []
+    for entry in entries:
+        topic = entry.get("topic", "").strip()
+        if topic and topic not in topics:
+            topics.append(topic)
+    return topics
+
+
+__all__ = ["append_memory_entry", "load_memory", "remember_run", "get_recent_topics"]

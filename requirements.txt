@@ -3,3 +3,5 @@ crewai[tools]
 pyyaml
 requests
 pytest
+supabase
+apscheduler

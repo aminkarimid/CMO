@@ -19,6 +19,7 @@ def test_agents_and_tasks_are_core_scope_only():
         "trend_intel_analyst",
     }
     allowed_tasks = {
+        "topic_generation_task",
         "brand_intel_refresh_task",
         "trend_brief_task",
         "strategy_outline_task",
