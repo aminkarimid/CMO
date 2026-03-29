@@ -31,6 +31,7 @@ from x3p_content_manager.memory import load_memory, remember_run
 from x3p_content_manager.quality import REPORT_PATH as QUALITY_REPORT_PATH
 from x3p_content_manager.quality import run_quality_checks as run_full_quality_checks
 from x3p_content_manager.seo_schema import save_seo_meta
+from x3p_content_manager.supabase_publisher import SupabasePublisher
 from x3p_content_manager.utils import log_telemetry
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
@@ -1012,6 +1013,40 @@ def render_minimal_customer_ui() -> None:
                     remember_run(pipeline, inputs, text)
                     log_telemetry(pipeline=pipeline, success=True, tokens=usage if isinstance(usage, dict) else {}, message="Run complete")
 
+                    # --- Auto-publish to Supabase ---
+                    publisher = SupabasePublisher()
+                    publish_result = None
+                    social_publish_result = None
+                    if publisher.is_configured():
+                        blog_md_for_publish = None
+                        social_md_for_publish = None
+                        if pipeline == "Blog":
+                            blog_md_for_publish = text
+                        elif pipeline == "Run All":
+                            _pub_blog, _pub_social = _split_blog_and_social(text, pipeline)
+                            blog_md_for_publish = _pub_blog
+                            social_md_for_publish = _pub_social
+                        elif pipeline == "Social":
+                            social_md_for_publish = text
+
+                        if blog_md_for_publish:
+                            publish_result = publisher.publish_blog(blog_md_for_publish)
+                            if publish_result.ok:
+                                st.success(f"Published to X3P: {publish_result.slug}")
+                            else:
+                                pipeline_warnings.append(f"Supabase publish failed: {publish_result.error}")
+
+                        if social_md_for_publish:
+                            blog_id = publish_result.blog_id if publish_result and publish_result.ok else None
+                            social_publish_result = publisher.publish_social(social_md_for_publish, blog_id)
+                            if social_publish_result.ok and social_publish_result.social_ids:
+                                st.success(f"Published {len(social_publish_result.social_ids)} social posts to X3P")
+                            elif social_publish_result.error and social_publish_result.error != "No social posts parsed":
+                                pipeline_warnings.append(f"Social publish failed: {social_publish_result.error}")
+
+                    st.session_state["last_publish_result"] = publish_result
+                    st.session_state["last_social_publish_result"] = social_publish_result
+
                     for warning in _dedupe_messages(recovered_events + pipeline_warnings):
                         st.warning(f"⚠️ {warning}")
 
@@ -1042,12 +1077,65 @@ def render_minimal_customer_ui() -> None:
                 st.error(normalize_generation_error(exc))
                 st.caption("Technical details were logged to runs/errors.log.")
 
+    # --- Scheduler Controls ---
+    with st.expander("Scheduled / Autonomous Runs", expanded=False):
+        from x3p_content_manager.scheduler import ContentScheduler
+
+        sched_status = ContentScheduler.get_schedule_status()
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            st.markdown(f"**Schedule enabled:** {'Yes' if sched_status.get('enabled') else 'No'}")
+            st.markdown(f"**Cron:** `{sched_status.get('cron') or 'not set'}`")
+        with col_s2:
+            st.markdown(f"**Last run:** {sched_status.get('last_run') or 'never'}")
+            last_res = sched_status.get("last_result") or {}
+            if last_res:
+                st.markdown(f"**Last topic:** {last_res.get('topic', 'N/A')}")
+                st.markdown(f"**Result:** {'OK' if last_res.get('ok') else 'Failed'}")
+
+        cron_presets = {
+            "Daily at 9am": "0 9 * * *",
+            "Twice a week (Mon/Thu)": "0 9 * * 1,4",
+            "Weekly (Monday)": "0 9 * * 1",
+            "Custom": "",
+        }
+        preset = st.selectbox("Schedule preset", list(cron_presets.keys()), key="sched_preset")
+        cron_value = cron_presets.get(preset, "")
+        if preset == "Custom":
+            cron_value = st.text_input("Cron expression (min hour dom month dow)", value=sched_status.get("cron", ""), key="sched_cron_input")
+
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("Save schedule", key="sched_save"):
+                if cron_value.strip():
+                    try:
+                        scheduler = ContentScheduler()
+                        scheduler.schedule_recurring(cron_value.strip())
+                        scheduler.stop()  # Don't keep the scheduler running in the UI process
+                        st.success(f"Schedule saved: `{cron_value.strip()}`")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Invalid cron: {e}")
+                else:
+                    st.warning("Enter a cron expression first.")
+        with col_b2:
+            if st.button("Run autonomous now", key="sched_run_once"):
+                with st.spinner("Running autonomous pipeline (topic gen + content + publish)..."):
+                    try:
+                        result = ContentScheduler().run_once()
+                        if result.get("ok"):
+                            st.success(f"Autonomous run complete! Topic: **{result.get('topic')}** | Published: {result.get('published_slug', 'N/A')}")
+                        else:
+                            st.error(f"Autonomous run failed: {result.get('error')}")
+                    except Exception as e:
+                        st.error(f"Run failed: {e}")
+
     if st.session_state.get("last_text"):
         last_pipeline = st.session_state.get("last_pipeline", "Run All")
         blog_text, social_text = _split_blog_and_social(st.session_state.last_text or "", last_pipeline)
         lf_text, ig_text = _split_social_channels(social_text)
         st.markdown("<div class='mini-results-title'>Outputs</div>", unsafe_allow_html=True)
-        blog_tab, lf_tab, ig_tab, files_tab, qa_tab = st.tabs(["Blog", "LinkedIn/Facebook", "Instagram", "Downloads", "Quality"])
+        blog_tab, lf_tab, ig_tab, files_tab, qa_tab, pub_tab = st.tabs(["Blog", "LinkedIn/Facebook", "Instagram", "Downloads", "Quality", "Publishing"])
 
         with blog_tab:
             if (blog_text or "").strip():
@@ -1120,3 +1208,33 @@ def render_minimal_customer_ui() -> None:
                     st.markdown(QUALITY_REPORT_PATH.read_text(encoding="utf-8"))
                 except Exception:
                     st.caption("Unable to load quality report.")
+
+        with pub_tab:
+            publisher = SupabasePublisher()
+            if not publisher.is_configured():
+                st.info("Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY to enable auto-publishing.")
+            else:
+                pub_result = st.session_state.get("last_publish_result")
+                social_pub_result = st.session_state.get("last_social_publish_result")
+
+                if pub_result and pub_result.ok:
+                    st.success(f"Blog published: **{pub_result.slug}**")
+                    st.markdown(f"[View on X3P](https://x3p.ai/blog/{pub_result.slug})")
+                elif pub_result and not pub_result.ok:
+                    st.error(f"Blog publish failed: {pub_result.error}")
+                else:
+                    st.caption("No blog published in this run.")
+
+                if social_pub_result and social_pub_result.ok and social_pub_result.social_ids:
+                    st.success(f"{len(social_pub_result.social_ids)} social posts published")
+                elif social_pub_result and social_pub_result.error and social_pub_result.error != "No social posts parsed":
+                    st.error(f"Social publish failed: {social_pub_result.error}")
+
+                st.markdown("---")
+                st.markdown("**Recent Published Posts**")
+                recent = publisher.list_published(limit=10)
+                if recent:
+                    for post in recent:
+                        st.write(f"- [{post.get('title', 'Untitled')}](https://x3p.ai/blog/{post.get('slug', '')}) — {post.get('date', '')}")
+                else:
+                    st.caption("No published posts found.")

@@ -1,3 +1,29 @@
+topic_generation_task:
+  description: |
+    Analyze recent content history, brand context, and current trends to suggest
+    the best next blog topic for X3P — a marketplace connecting families to
+    verified home caregivers.
+
+    Recent topics already covered (avoid repeating these): {recent_topics}
+    Brand snapshot: {brand_snapshot}
+    Current trend signals: {trend_signals}
+
+    Pick a topic that:
+    - Has NOT been covered in the recent topics list
+    - Aligns with current care economy or workforce trends
+    - Fills a content gap for X3P's target audiences (families, caregivers, employers)
+    - Can be written with evidence-based claims (no fabrication)
+
+    Output ONLY a single JSON object (no markdown, no code fence) with keys:
+    - topic (string: the blog topic title)
+    - audience (string: primary target audience for this post)
+    - tone (string: recommended writing tone)
+    - angle (string: unique hook or angle that makes this timely)
+    - rationale (string: 1-2 sentences on why this topic now)
+  expected_output: >
+    A JSON object with topic, audience, tone, angle, and rationale.
+  agent: strategist
+
 brand_intel_refresh_task:
   description: |
     Refresh X3P brand intelligence from x3p.ai using live sources and existing context.

@@ -175,9 +175,25 @@ def lint_configs() -> int:
     return 0
 
 
+def run_schedule_start():
+    from x3p_content_manager.scheduler import ContentScheduler
+    ContentScheduler().start()
+
+
+def run_schedule_once():
+    from x3p_content_manager.scheduler import ContentScheduler
+    result = ContentScheduler().run_once()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def run_schedule_status():
+    from x3p_content_manager.scheduler import ContentScheduler
+    print(json.dumps(ContentScheduler.get_schedule_status(), indent=2, default=str))
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python -m x3p_content_manager.main [blog|social|all|lint]")
+        print("Usage: python -m x3p_content_manager.main [blog|social|all|lint|schedule-start|schedule-run-once|schedule-status]")
         raise SystemExit(1)
 
     mode = sys.argv[1].lower().strip()
@@ -185,7 +201,14 @@ if __name__ == "__main__":
     if mode == "lint":
         raise SystemExit(lint_configs())
 
-    routes = {"blog": run_blog, "social": run_social, "all": run_all}
+    routes = {
+        "blog": run_blog,
+        "social": run_social,
+        "all": run_all,
+        "schedule-start": run_schedule_start,
+        "schedule-run-once": run_schedule_once,
+        "schedule-status": run_schedule_status,
+    }
     if mode not in routes:
         print(f"Unknown mode: {mode}")
         raise SystemExit(1)
